@@ -9,9 +9,11 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"regexp"
 	"strconv"
@@ -83,6 +85,8 @@ var (
 	logLevel                 = kingpin.Flag("log.level", "set log level: trace, debug, info, warn, error (default info)").Default("info").Envar("LOG_LEVEL").String()
 	logFormat                = kingpin.Flag("log.format", "set log format: text, json (default text)").Default("text").Envar("LOG_FORMAT").String()
 	storageBackend           = kingpin.Flag("storage.backend", "storage backend: filesystem, kubernetes.secrets (default filesystem)").Default("filesystem").Envar("STORAGE_BACKEND").String()
+	googleAuth2FAEnabled     = kingpin.Flag("auth.mfa", "enable 2FA authentication").Default("false").Envar("OVPN_2FA").Bool()
+	googleAuthDir            = kingpin.Flag("google-auth.path", "path to store qr-code and secret keys of users").Default("/etc/google-auth").Envar("GOOGLE_2FA_AUTH_DIR").String()
 	clientCertExpirationDays = kingpin.Flag("client-cert.expiration-days", "Expiration period of OpenVPN client certificates in days, the period will shrink automatically to the CA expiration period").Default("3650").Envar("CLIENT_CERT_EXPIRATION_DAYS").String()
 
 	certsArchivePath = "/tmp/" + certsArchiveFileName
@@ -561,6 +565,10 @@ func main() {
 		ovpnAdmin.modules = append(ovpnAdmin.modules, "ccd")
 	}
 
+	if *googleAuth2FAEnabled {
+		ovpnAdmin.modules = append(ovpnAdmin.modules, "google-auth-2fa")
+	}
+
 	if ovpnAdmin.role == "slave" {
 		ovpnAdmin.syncDataFromMaster()
 		go ovpnAdmin.syncWithMaster()
@@ -590,6 +598,7 @@ func main() {
 	http.HandleFunc(*listenBaseUrl+"api/sync/last/successful", ovpnAdmin.lastSuccessfulSyncTimeHandler)
 	http.HandleFunc(*listenBaseUrl+downloadCertsApiUrl, ovpnAdmin.downloadCertsHandler)
 	http.HandleFunc(*listenBaseUrl+downloadCcdApiUrl, ovpnAdmin.downloadCcdHandler)
+	http.HandleFunc(*listenBaseUrl + "api/qr-code/", downloadHandler)
 
 	http.Handle(*metricsPath, promhttp.HandlerFor(ovpnAdmin.promRegistry, promhttp.HandlerOpts{}))
 	http.HandleFunc(*listenBaseUrl+"ping", func(w http.ResponseWriter, r *http.Request) {
@@ -598,6 +607,62 @@ func main() {
 
 	log.Printf("Bind: http://%s:%s%s", *listenHost, *listenPort, *listenBaseUrl)
 	log.Fatal(http.ListenAndServe(*listenHost+":"+*listenPort, nil))
+}
+
+func downloadHandler(w http.ResponseWriter, r *http.Request) {
+	username := strings.TrimPrefix(r.URL.Path, "/api/qr-code/")
+	if username == "" {
+		http.Error(w, "Username not provided", http.StatusBadRequest)
+		return
+	}
+
+	// Verificar si el archivo de google-auth existe
+	authFile := fmt.Sprintf("%s/%s", *googleAuthDir, username)
+	if _, err := os.Stat(authFile); os.IsNotExist(err) {
+		http.Error(w, "Google auth secret not found for user", http.StatusNotFound)
+		return
+	}
+
+	// Leer el secreto
+	content, err := ioutil.ReadFile(authFile)
+	if err != nil {
+		http.Error(w, "Error reading auth file", http.StatusInternalServerError)
+		return
+	}
+
+	lines := strings.Split(string(content), "\n")
+	if len(lines) == 0 {
+		http.Error(w, "Invalid auth file format", http.StatusInternalServerError)
+		return
+	}
+
+	secret := lines[0]
+	if secret == "" {
+		http.Error(w, "Secret not found in auth file", http.StatusInternalServerError)
+		return
+	}
+
+	// Generar el QR code data
+	otpUrl := fmt.Sprintf("otpauth://totp/%s@OpenVPN?secret=%s&issuer=OpenVPN", username, secret)
+	
+	// Usar un servicio externo para generar el QR (más confiable)
+	qrUrl := fmt.Sprintf("https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=%s", url.QueryEscape(otpUrl))
+	
+	resp, err := http.Get(qrUrl)
+	if err != nil {
+		http.Error(w, "Error generating QR code", http.StatusInternalServerError)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		http.Error(w, "QR service error", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "image/png")
+	w.Header().Set("Cache-Control", "max-age=3600") // 1 hour
+	io.Copy(w, resp.Body)
 }
 
 func CacheControlWrapper(h http.Handler) http.Handler {
@@ -1041,7 +1106,7 @@ func (oAdmin *OvpnAdmin) userCreate(username, password string) (bool, string) {
 			log.Error(err)
 		}
 	} else {
-		o := runBash(fmt.Sprintf("cd %s && %s --batch build-client-full %s nopass 1>/dev/null", *easyrsaDirPath, *easyrsaBinPath, username))
+		o := runBash(fmt.Sprintf("cd %s && echo 'yes' | %s build-client-full %s nopass 1>/dev/null", *easyrsaDirPath, *easyrsaBinPath, username))
 		log.Debug(o)
 	}
 
@@ -1050,9 +1115,14 @@ func (oAdmin *OvpnAdmin) userCreate(username, password string) (bool, string) {
 		log.Debug(o)
 	}
 
+	if *googleAuth2FAEnabled {
+		mfa_auth := runBash(fmt.Sprintf("/etc/openvpn/google-auth.sh %s", username))
+		log.Debug(mfa_auth)
+	}
+
 	log.Infof("Certificate for user %s issued", username)
 
-	//oAdmin.clients = oAdmin.usersList()
+	oAdmin.clients = oAdmin.usersList()
 
 	return true, ucErr
 }
@@ -1071,6 +1141,11 @@ func (oAdmin *OvpnAdmin) userChangePassword(username, password string) (error, s
 		if strings.TrimSpace(o) == "0" {
 			o = runBash(fmt.Sprintf("openvpn-user create --db.path %s --user %s --password %s", *authDatabase, username, password))
 			log.Debug(o)
+		}
+
+		if *googleAuth2FAEnabled {
+			mfa_auth := runBash(fmt.Sprintf("/etc/openvpn/google-auth.sh %s", username))
+			log.Debug(mfa_auth)
 		}
 
 		o = runBash(fmt.Sprintf("openvpn-user change-password --db.path %s --user %s --password %s", *authDatabase, username, password))
