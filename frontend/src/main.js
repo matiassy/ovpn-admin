@@ -12,6 +12,8 @@ Vue.use(BootstrapVue)
 Vue.use(Notifications)
 Vue.use(VueGoodTablePlugin)
 
+console.log('Vue plugins loaded');
+
 var axios_cfg = function(url, data='', type='form') {
   if (data == '') {
     return {
@@ -36,7 +38,7 @@ var axios_cfg = function(url, data='', type='form') {
     return {
       method: 'post',
       url: url,
-      data: data,
+      data: JSON.stringify(data),
       headers: { 'Content-Type': 'application/json' }
     };
   }
@@ -49,37 +51,27 @@ new Vue({
       {
         label: 'Name',
         field: 'Identity',
-        // filterable: true,
+        sortable: true,
       },
       {
         label: 'Account Status',
         field: 'AccountStatus',
-        filterable: true,
+        sortable: true,
       },
       {
         label: 'Active Connections',
         field: 'Connections',
-        filterable: true,
+        sortable: true,
       },
       {
         label: 'Expiration Date',
         field: 'ExpirationDate',
-        type: 'date',
-        dateInputFormat: 'yyyy-MM-dd HH:mm:ss',
-        dateOutputFormat: 'yyyy-MM-dd HH:mm:ss',
-        formatFn: function (value) {
-          return value != "" ? value : ""
-        }
+        sortable: true,
       },
       {
         label: 'Revocation Date',
         field: 'RevocationDate',
-        type: 'date',
-        dateInputFormat: 'yyyy-MM-dd HH:mm:ss',
-        dateOutputFormat: 'yyyy-MM-dd HH:mm:ss',
-        formatFn: function (value) {
-          return value != "" ? value : ""
-        }
+        sortable: true,
       },
       {
         label: '2FA',
@@ -97,6 +89,10 @@ new Vue({
       },
     ],
     rows: [],
+    tableKey: 0, // Para forzar re-renderizado
+    searchQuery: '', // Para búsqueda
+    sortField: 'Identity', // Campo de ordenamiento por defecto
+    sortDirection: 'asc', // Dirección de ordenamiento por defecto
     actions: [
       {
         name: 'u-change-password',
@@ -265,9 +261,16 @@ new Vue({
   watch: {
   },
   mounted: function () {
+    console.log('Vue app mounted');
     this.getUserData();
     this.getServerSetting();
     this.filters.hideRevoked = this.$cookies.isKey('hideRevoked') ? (this.$cookies.get('hideRevoked') == "true") : false
+    console.log('Initial hideRevoked filter:', this.filters.hideRevoked);
+    
+    // Watch for changes in filteredRows
+    this.$watch('filteredRows', function(newVal) {
+      console.log('filteredRows changed:', newVal.length, 'items');
+    });
   },
   created() {
     var _this = this;
@@ -400,17 +403,90 @@ new Vue({
       return this.filters.hideRevoked ? "Show revoked" : "Hide revoked"
     },
     filteredRows: function() {
-      if (this.filters.hideRevoked) {
-        return this.rows.filter(function(account) {
+      var filtered = this.filters.hideRevoked ? 
+        this.rows.filter(function(account) {
           return account.AccountStatus == "Active"
-        });
-      } else {
-        return this.rows
+        }) : 
+        this.rows;
+      console.log('=== FILTER DEBUG ===');
+      console.log('Total rows:', this.rows.length);
+      console.log('hideRevoked filter:', this.filters.hideRevoked);
+      console.log('Filtered rows:', filtered.length);
+      console.log('==================');
+      return filtered;
+    },
+    filteredAndSearchedRows: function() {
+      var filtered = this.filteredRows;
+      if (!this.searchQuery) {
+        return this.sortRows(filtered);
       }
-    }
+      var query = this.searchQuery.toLowerCase();
+      var searched = filtered.filter(function(user) {
+        return user.Identity.toLowerCase().includes(query) ||
+               user.AccountStatus.toLowerCase().includes(query) ||
+               (user.TwoFAEnabled && '2fa'.includes(query)) ||
+               (!user.TwoFAEnabled && 'no 2fa'.includes(query));
+      });
+      return this.sortRows(searched);
+    },
+    sortedAndSearchedRows: function() {
+      return this.filteredAndSearchedRows;
+    },
 
   },
   methods: {
+    sortBy: function(field) {
+      if (this.sortField === field) {
+        this.sortDirection = this.sortDirection === 'asc' ? 'desc' : 'asc';
+      } else {
+        this.sortField = field;
+        this.sortDirection = 'asc';
+      }
+    },
+    sortRows: function(rows) {
+      var _this = this;
+      return rows.slice().sort(function(a, b) {
+        var aValue = a[_this.sortField];
+        var bValue = b[_this.sortField];
+        
+        // Handle different data types
+        if (_this.sortField === 'Connections') {
+          aValue = parseInt(aValue) || 0;
+          bValue = parseInt(bValue) || 0;
+        } else if (_this.sortField === 'ExpirationDate' || _this.sortField === 'RevocationDate') {
+          aValue = aValue || '';
+          bValue = bValue || '';
+        } else {
+          aValue = String(aValue || '').toLowerCase();
+          bValue = String(bValue || '').toLowerCase();
+        }
+        
+        if (aValue < bValue) {
+          return _this.sortDirection === 'asc' ? -1 : 1;
+        }
+        if (aValue > bValue) {
+          return _this.sortDirection === 'asc' ? 1 : -1;
+        }
+        return 0;
+      });
+    },
+    getStatusClass: function(status) {
+      switch(status) {
+        case 'Active': return 'status-active';
+        case 'Revoked': return 'status-revoked';
+        case 'Expired': return 'status-expired';
+        default: return '';
+      }
+    },
+    formatDate: function(dateString) {
+      if (!dateString) return '';
+      try {
+        var date = new Date(dateString);
+        return date.toLocaleDateString() + ' ' + date.toLocaleTimeString();
+      } catch(e) {
+        return dateString;
+      }
+    },
     rowStyleClassFn: function(row) {
       if (row.ConnectionStatus == 'Connected') {
         return 'connected-user'
@@ -423,15 +499,39 @@ new Vue({
       }
       return ''
     },
+    getVisibleActions: function(row) {
+      return this.actions.filter(action => 
+        action.showWhenStatus === row.AccountStatus &&
+        action.showForServerRole.includes(this.serverRole) &&
+        action.showForModule.some(module => this.modulesEnabled.includes(module))
+      );
+    },
     rowActionFn: function(e) {
       this.username = e.target.dataset.username;
       this.$root.$emit(e.target.dataset.name);
     },
     getUserData: function() {
       var _this = this;
+      console.log('Fetching user data...');
       axios.request(axios_cfg('api/users/list'))
         .then(function(response) {
+          console.log('User data received:', response.data);
           _this.rows = Array.isArray(response.data) ? response.data : [];
+          console.log('Rows set to:', _this.rows);
+          console.log('Rows length:', _this.rows.length);
+          
+          // Forzar re-renderizado completo incrementando la key
+          _this.tableKey += 1;
+          console.log('Table key incremented to:', _this.tableKey);
+          
+          _this.$nextTick(function() {
+            console.log('NextTick triggered');
+            _this.$forceUpdate();
+          });
+        })
+        .catch(function(error) {
+          console.error('Error fetching user data:', error);
+          _this.rows = [];
         });
     },
 
@@ -453,8 +553,19 @@ new Vue({
 
     createUser: function() {
       var _this = this;
+      console.log('createUser called with:', {
+        username: _this.u.newUserName,
+        password: _this.u.newUserPassword,
+        enable2fa: _this.u.newUser2FA
+      });
 
       _this.u.newUserCreateError = "";
+
+      if (!_this.u.newUserName || !_this.u.newUserPassword) {
+        console.error('Username or password missing');
+        _this.u.newUserCreateError = "Username and password are required";
+        return;
+      }
 
       var data = new URLSearchParams();
       data.append('username', _this.u.newUserName);
@@ -463,19 +574,24 @@ new Vue({
 
       _this.username = _this.u.newUserName;
 
+      console.log('Sending request to create user...');
       axios.request(axios_cfg('api/user/create', data, 'form'))
       .then(function(response) {
+        console.log('User created successfully:', response.data);
         _this.$notify({title: 'New user ' + _this.username + ' created', type: 'success'})
         _this.u.modalNewUserVisible = false;
         _this.u.newUserName = '';
         _this.u.newUserPassword = '';
         _this.u.newUser2FA = false;
+        
+        // Forzar recarga de datos
+        _this.tableKey += 1;
         _this.getUserData();
       })
       .catch(function(error) {
+        console.error('Error creating user:', error);
         _this.u.newUserCreateError = error.response.data;
         _this.$notify({title: 'New user ' + _this.username + ' creation failed.', type: 'error'})
-
       });
     },
 

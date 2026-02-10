@@ -41,7 +41,7 @@ module.exports = {
     },
     resolve: {
       alias: {
-        'vue$': 'vue/dist/vue.esm.js',
+        'vue$': 'vue/dist/vue.js',
         //'bootstrap-vue$': 'bootstrap-vue/src/index.js'
       },
       extensions: ['*', '.js', '.vue', '.json']

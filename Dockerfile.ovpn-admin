@@ -12,6 +12,7 @@ RUN cd /app && packr2 && env CGO_ENABLED=1 GOOS=linux GOARCH=${TARGETARCH} go bu
 FROM alpine:3.23
 WORKDIR /app
 COPY --from=backend-builder /app/ovpn-admin /app
+COPY --from=frontend-builder /app/static /app/frontend/static
 ARG TARGETARCH
 RUN apk add --no-cache \
     bash \
