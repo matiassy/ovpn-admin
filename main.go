@@ -225,6 +225,7 @@ type OpenvpnClient struct {
 	RevocationDate   string `json:"RevocationDate"`
 	ConnectionStatus string `json:"ConnectionStatus"`
 	Connections      int    `json:"Connections"`
+	TwoFAEnabled     bool   `json:"TwoFAEnabled"`
 }
 
 type ccdRoute struct {
@@ -291,7 +292,8 @@ func (oAdmin *OvpnAdmin) userCreateHandler(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	_ = r.ParseForm()
-	userCreated, userCreateStatus := oAdmin.userCreate(r.FormValue("username"), r.FormValue("password"))
+	enable2FA := r.FormValue("enable2fa") == "true"
+	userCreated, userCreateStatus := oAdmin.userCreate(r.FormValue("username"), r.FormValue("password"), enable2FA)
 
 	if userCreated {
 		oAdmin.clients = oAdmin.usersList()
@@ -364,6 +366,51 @@ func (oAdmin *OvpnAdmin) userUnrevokeHandler(w http.ResponseWriter, r *http.Requ
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprintf(w, msg)
 	}
+}
+
+func (oAdmin *OvpnAdmin) userToggle2FAHandler(w http.ResponseWriter, r *http.Request) {
+	log.Info(r.RemoteAddr, " ", r.RequestURI)
+	if oAdmin.role == "slave" {
+		http.Error(w, `{"status":"error"}`, http.StatusLocked)
+		return
+	}
+	
+	_ = r.ParseForm()
+	username := r.FormValue("username")
+	enable := r.FormValue("enable") == "true"
+	
+	if username == "" {
+		http.Error(w, "Username not provided", http.StatusBadRequest)
+		return
+	}
+	
+	if !checkUserExist(username) {
+		http.Error(w, fmt.Sprintf("User \"%s\" not found", username), http.StatusNotFound)
+		return
+	}
+	
+	if enable {
+		// Enable 2FA
+		if *googleAuth2FAEnabled {
+			mfa_auth := runBash(fmt.Sprintf("/etc/openvpn/google-auth.sh %s", username))
+			log.Debug(mfa_auth)
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprintf(w, `{"msg":"2FA enabled for user %s"}`, username)
+		} else {
+			http.Error(w, "2FA is not enabled on server", http.StatusForbidden)
+		}
+	} else {
+		// Disable 2FA
+		authFile := fmt.Sprintf("%s/%s", *googleAuthDir, username)
+		if err := os.Remove(authFile); err != nil {
+			http.Error(w, fmt.Sprintf("Failed to disable 2FA: %v", err), http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintf(w, `{"msg":"2FA disabled for user %s"}`, username)
+	}
+	
+	oAdmin.clients = oAdmin.usersList()
 }
 
 func (oAdmin *OvpnAdmin) userChangePasswordHandler(w http.ResponseWriter, r *http.Request) {
@@ -584,6 +631,7 @@ func main() {
 	http.HandleFunc(*listenBaseUrl+"api/users/list", ovpnAdmin.userListHandler)
 	http.HandleFunc(*listenBaseUrl+"api/user/create", ovpnAdmin.userCreateHandler)
 	http.HandleFunc(*listenBaseUrl+"api/user/change-password", ovpnAdmin.userChangePasswordHandler)
+	http.HandleFunc(*listenBaseUrl+"api/user/2fa/toggle", ovpnAdmin.userToggle2FAHandler)
 	http.HandleFunc(*listenBaseUrl+"api/user/rotate", ovpnAdmin.userRotateHandler)
 	http.HandleFunc(*listenBaseUrl+"api/user/delete", ovpnAdmin.userDeleteHandler)
 	http.HandleFunc(*listenBaseUrl+"api/user/revoke", ovpnAdmin.userRevokeHandler)
@@ -1054,6 +1102,13 @@ func (oAdmin *OvpnAdmin) usersList() []OpenvpnClient {
 				connectedUniqUsers += 1
 			}
 
+			// Check if user has 2FA enabled
+			if _, err := os.Stat(fmt.Sprintf("%s/%s", *googleAuthDir, ovpnClient.Identity)); err == nil {
+				ovpnClient.TwoFAEnabled = true
+			} else {
+				ovpnClient.TwoFAEnabled = false
+			}
+
 			users = append(users, ovpnClient)
 
 		} else {
@@ -1076,7 +1131,7 @@ func (oAdmin *OvpnAdmin) usersList() []OpenvpnClient {
 	return users
 }
 
-func (oAdmin *OvpnAdmin) userCreate(username, password string) (bool, string) {
+func (oAdmin *OvpnAdmin) userCreate(username, password string, enable2FA bool) (bool, string) {
 	ucErr := fmt.Sprintf("User \"%s\" created", username)
 
 	oAdmin.createUserMutex.Lock()
@@ -1115,7 +1170,7 @@ func (oAdmin *OvpnAdmin) userCreate(username, password string) (bool, string) {
 		log.Debug(o)
 	}
 
-	if *googleAuth2FAEnabled {
+	if *googleAuth2FAEnabled && enable2FA {
 		mfa_auth := runBash(fmt.Sprintf("/etc/openvpn/google-auth.sh %s", username))
 		log.Debug(mfa_auth)
 	}
@@ -1302,7 +1357,7 @@ func (oAdmin *OvpnAdmin) userRotate(username, newPassword string) (error, string
 				log.Debug(o)
 			}
 
-			userCreated, userCreateMessage := oAdmin.userCreate(username, newPassword)
+			userCreated, userCreateMessage := oAdmin.userCreate(username, newPassword, *googleAuth2FAEnabled)
 			if !userCreated {
 				usersFromIndexTxt = indexTxtParser(fRead(*indexTxtPath))
 				for i := range usersFromIndexTxt {

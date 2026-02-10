@@ -82,6 +82,13 @@ new Vue({
         }
       },
       {
+        label: '2FA',
+        field: 'TwoFAEnabled',
+        sortable: false,
+        tdClass: 'text-center',
+        globalSearchDisabled: true,
+      },
+      {
         label: 'Actions',
         field: 'actions',
         sortable: false,
@@ -172,6 +179,22 @@ new Vue({
         showForModule: ["google-auth-2fa"],
       },
       {
+        name: 'u-enable-2fa',
+        label: 'Enable 2FA',
+        class: 'btn-success',
+        showWhenStatus: 'Active',
+        showForServerRole: ['master'],
+        showForModule: ["google-auth-2fa"],
+      },
+      {
+        name: 'u-disable-2fa',
+        label: 'Disable 2FA',
+        class: 'btn-secondary',
+        showWhenStatus: 'Active',
+        showForServerRole: ['master'],
+        showForModule: ["google-auth-2fa"],
+      },
+      {
         name: 'u-edit-ccd',
         label: 'Edit routes',
         class: 'btn-primary',
@@ -197,6 +220,7 @@ new Vue({
     u: {
       newUserName: '',
       newUserPassword: '',
+      newUser2FA: false,
       newUserCreateError: '',
       newPassword: '',
       passwordChangeStatus: '',
@@ -218,6 +242,24 @@ new Vue({
       newRoute: {},
       ccdApplyStatus: "",
       ccdApplyStatusMessage: "",
+    },
+
+    toggleUser2FA: function(username, enable) {
+      var _this = this;
+
+      var data = new URLSearchParams();
+      data.append('username', username);
+      data.append('enable', enable ? 'true' : 'false');
+
+      axios.request(axios_cfg('api/user/2fa/toggle', data, 'form'))
+        .then(function(response) {
+          var action = enable ? 'enabled' : 'disabled';
+          _this.$notify({title: '2FA ' + action + ' for user ' + username, type: 'success'})
+          _this.getUserData();
+        })
+        .catch(function(error) {
+          _this.$notify({title: 'Failed to toggle 2FA for user ' + username, type: 'error'})
+        })
     }
   },
   watch: {
@@ -417,6 +459,7 @@ new Vue({
       var data = new URLSearchParams();
       data.append('username', _this.u.newUserName);
       data.append('password', _this.u.newUserPassword);
+      data.append('enable2fa', _this.u.newUser2FA ? 'true' : 'false');
 
       _this.username = _this.u.newUserName;
 
@@ -426,6 +469,7 @@ new Vue({
         _this.u.modalNewUserVisible = false;
         _this.u.newUserName = '';
         _this.u.newUserPassword = '';
+        _this.u.newUser2FA = false;
         _this.getUserData();
       })
       .catch(function(error) {

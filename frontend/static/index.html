@@ -24,6 +24,12 @@
       <button type="button" class="btn btn-sm btn-success el-square" v-if="serverRole == 'master'" v-on:click.stop="u.modalNewUserVisible=true">Add user</button>
     </div>
     <template slot="table-row" slot-scope="props">
+      <span v-if="props.column.field == 'TwoFAEnabled'">
+        <input type="checkbox" 
+               :checked="props.row.TwoFAEnabled" 
+               @change="toggleUser2FA(props.row.Identity, $event.target.checked)"
+               :title="props.row.TwoFAEnabled ? 'Click to disable 2FA' : 'Click to enable 2FA'">
+      </span>
       <span v-if="props.column.field == 'actions'">
         <button
           class="btn btn-sm el-square modal-el-margin"
@@ -51,6 +57,12 @@
         <div class="modal-body">
           <input type="text" class="form-control el-square modal-el-margin" placeholder="Username [_a-zA-Z0-9\.-]" v-model="u.newUserName">
           <input type="password" class="form-control el-square modal-el-margin" minlength="6" autocomplete="off" placeholder="Password [_a-zA-Z0-9\.-]" v-model="u.newUserPassword" v-if="modulesEnabled.includes('passwdAuth')">
+          <div class="form-check modal-el-margin" v-if="modulesEnabled.includes('google-auth-2fa')">
+            <input type="checkbox" class="form-check-input" id="newUser2FA" v-model="u.newUser2FA">
+            <label class="form-check-label" for="newUser2FA">
+              Enable 2FA (Google Authenticator)
+            </label>
+          </div>
         </div>
 
         <div class="modal-footer justify-content-center" v-if="u.newUserCreateError.length > 0">
@@ -60,7 +72,7 @@
         </div>
         <div class="modal-footer">
             <button type="button" class="btn btn-success el-square modal-el-margin" v-on:click.stop="createUser()">Create</button>
-            <button type="button" class="btn btn-primary el-square d-flex justify-content-sm-end modal-el-margin" v-on:click.stop="u.newUserName='';u.newUserPassword='nopass';u.modalNewUserVisible=false">Close</button>
+            <button type="button" class="btn btn-primary el-square d-flex justify-content-sm-end modal-el-margin" v-on:click.stop="u.newUserName='';u.newUserPassword='nopass';u.newUser2FA=false;u.modalNewUserVisible=false">Close</button>
         </div>
       </div>
     </div>
